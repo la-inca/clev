@@ -1,0 +1,136 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use POSIX qw(setsid);
+
+# Konfigurasi
+my $TELEGRAM_BOT_TOKEN = "8039208895:AAHjSn-m7EUUDB-iKbybRVORWVx6hh_XUyc";
+my $TELEGRAM_CHAT_ID  = "1256183067";
+my $MONITOR_DIR       = "/";
+my @BACKDOOR_PATTERNS = qw(eval\( base64_decode\( system\( exec\( passthru\( shell_exec\( popen\( proc_open\( backdoor cmd=);
+my @EXTENSIONS        = qw(.php .phtml .php3 .php4 .php5 .phps);
+
+# Fungsi untuk mengirim notifikasi Telegram
+sub send_telegram_message {
+    my ($file_path) = @_;
+    system("curl -s --connect-timeout 3 'https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage?chat_id=$TELEGRAM_CHAT_ID&text=Backdoor detected: $file_path' >/dev/null 2>&1");
+}
+
+# Fungsi untuk mengamankan file
+sub secure_file {
+    my ($file_path) = @_;
+    
+    # Hapus file asli
+    unlink $file_path or warn "Cannot unlink $file_path: $!";
+    
+    # Buat file baru dengan konten yang aman
+    open my $fh, ">", $file_path or die "Cannot create $file_path: $!";
+    print $fh "quarantined backdoor";
+    close $fh;
+    
+    # Set permission ke read-only
+    chmod 0444, $file_path or warn "Cannot chmod $file_path: $!";
+    
+    # Kirim notifikasi
+    send_telegram_message($file_path);
+    
+    return 1;
+}
+
+# Fungsi utama untuk memantau direktori
+sub monitor_directory {
+    my %file_stats;
+    my %protected_files;
+    
+    while (1) {
+        # Cari semua file PHP yang diakses, dibuat, atau dimodifikasi dalam 2 detik terakhir
+        open my $find, "find $MONITOR_DIR -type f \\( -name '*.php' -o -name '*.phtml' -o -name '*.php3' -o -name '*.php4' -o -name '*.php5' -o -name '*.phps' \\) \\( -amin -0.033 -o -cmin -0.033 -o -mmin -0.033 \\) 2>/dev/null |"
+            or die "Cannot open find: $!";
+        
+        while (my $file_path = <$find>) {
+            chomp $file_path;
+            
+            # Dapatkan statistik file
+            my @stat = stat($file_path) or next;
+            my $current_mtime = $stat[9];
+            my $current_mode = $stat[2] & 07777;
+            
+            # Periksa apakah file baru, diakses, dimodifikasi, atau di-rename
+            if (!exists $file_stats{$file_path} || 
+                $file_stats{$file_path}{mtime} != $current_mtime ||
+                $file_stats{$file_path}{mode} != $current_mode) {
+                
+                # Perbarui statistik file
+                $file_stats{$file_path} = {
+                    mtime => $current_mtime,
+                    mode => $current_mode
+                };
+                
+                # Baca isi file
+                open my $fh, "<", $file_path or next;
+                local $/;
+                my $content = <$fh>;
+                close $fh;
+                
+                # Periksa apakah file dilindungi
+                if ($content eq "quarantined backdoor") {
+                    $protected_files{$file_path} = 1;
+                    
+                    # Pastikan permission tetap 0444
+                    if ($current_mode != 0444) {
+                        chmod 0444, $file_path or warn "Cannot chmod $file_path: $!";
+                    }
+                    next;
+                }
+                
+                # Periksa pola backdoor atau amankan langsung jika baru diakses/dibuat/di-rename
+                if (grep { $content =~ /\Q$_/i } @BACKDOOR_PATTERNS || !exists $file_stats{$file_path}) {
+                    # Amankan file
+                    secure_file($file_path);
+                    $protected_files{$file_path} = 1;
+                }
+            }
+        }
+        close $find;
+        
+        # Periksa semua file yang dilindungi setiap 0.5 detik
+        for my $file_path (keys %protected_files) {
+            next unless -e $file_path;
+            
+            # Dapatkan statistik file
+            my @stat = stat($file_path) or next;
+            my $current_mode = $stat[2] & 07777;
+            
+            # Periksa dan perbaiki permission jika diperlukan
+            if ($current_mode != 0444) {
+                chmod 0444, $file_path or warn "Cannot chmod $file_path: $!";
+            }
+            
+            # Periksa isi file
+            open my $fh, "<", $file_path or next;
+            local $/;
+            my $content = <$fh>;
+            close $fh;
+            
+            # Perbaiki jika isi file diubah
+            if ($content ne "quarantined backdoor") {
+                secure_file($file_path);
+            }
+        }
+        
+        sleep 0.5;
+    }
+}
+
+# Fungsi main
+sub main {
+    # Menjadi daemon
+    defined(my $pid = fork) or die "Cannot fork: $!";
+    exit if $pid;
+    setsid() or die "Cannot setsid: $!";
+    
+    # Mulai memantau
+    monitor_directory();
+}
+
+main() if $0 eq __FILE__;
