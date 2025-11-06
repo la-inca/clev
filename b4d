@@ -1,0 +1,1481 @@
+<?php
+$minute = 30;
+$limit = (60 * $minute);
+ini_set('memory_limit', '-1');
+ini_set('max_execution_time', $limit);
+set_time_limit($limit);
+
+function advancedRecursiveScan($directory, &$entries_array = array(), $max_depth = 50, $depth = 0) {
+    if ($depth > $max_depth) {
+        return $entries_array;
+    }
+    
+    $handle = @opendir($directory);
+    if ($handle) {
+        while (($entry = readdir($handle)) !== false) {
+        	
+            if ($entry == '.' || $entry == '..') {
+                continue;
+            }
+            
+            $entry_path = $directory . DIRECTORY_SEPARATOR . $entry;
+            
+            
+            if (is_link($entry_path)) {
+                continue;
+            }
+            
+            if (is_dir($entry_path) && is_readable($entry_path)) {
+              
+                $entries_array = advancedRecursiveScan($entry_path, $entries_array, $max_depth, $depth + 1);
+            }
+            
+            if (is_file($entry_path) && is_readable($entry_path)) {
+                $entries_array['file_writable'][] = $entry_path;
+            } elseif (is_file($entry_path)) {
+                $entries_array['file_not_writable'][] = $entry_path;
+            }
+        }
+        closedir($handle);
+    }
+    return $entries_array;
+}
+
+
+function getFilePreview($filePath, $maxLines = 50) {
+    if (!file_exists($filePath) || !is_readable($filePath)) {
+        return array('error' => 'Cannot read file');
+    }
+    
+    $content = file_get_contents($filePath);
+    $lines = explode("\n", $content);
+    $totalLines = count($lines);
+    
+    $previewLines = array_slice($lines, 0, $maxLines);
+    $isTruncated = $totalLines > $maxLines;
+    
+    return array(
+        'preview' => implode("\n", $previewLines),
+        'total_lines' => $totalLines,
+        'preview_lines' => count($previewLines),
+        'is_truncated' => $isTruncated,
+        'file_size' => filesize($filePath)
+    );
+}
+
+function getFileUrl($filePath) {
+    $documentRoot = realpath($_SERVER['DOCUMENT_ROOT']);
+    $fileRealPath = realpath($filePath);
+    if ($fileRealPath && strpos($fileRealPath, $documentRoot) === 0) {
+        $relativePath = str_replace($documentRoot, '', $fileRealPath);
+        $relativePath = str_replace('\\', '/', $relativePath);
+        return $relativePath;
+    }
+    
+    return $filePath;
+}
+
+function sortByLastModified($files) {
+    @array_multisort(array_map('filemtime', $files), SORT_DESC, $files);
+    return $files;
+}
+
+function getSortedByTime($path) {
+    $result = advancedRecursiveScan($path);
+    $fileWritable = $result['file_writable'];
+    $fileNotWritable = isset($result['file_not_writable']) ? $result['file_not_writable'] : array();
+    $fileWritable = sortByLastModified($fileWritable);
+
+    return array(
+        'file_writable' => $fileWritable,
+        'file_not_writable' => $fileNotWritable
+    );
+}
+
+function getSortedByExtension($path, $ext) {
+    $result = getSortedByTime($path);
+    $fileWritable = $result['file_writable'];
+    $fileNotWritable = $result['file_not_writable'];
+
+    $sortedWritableFile = array();
+    $sortedNotWritableFile = array();
+
+    foreach ($fileWritable as $entry) {
+        $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
+        $pathinfo = strtolower($pathinfo);
+
+        if (in_array($pathinfo, $ext)) {
+            $sortedWritableFile[] = $entry;
+        }
+    }
+
+    foreach ($fileNotWritable as $entry) {
+        $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
+        $pathinfo = strtolower($pathinfo);
+
+        if (in_array($pathinfo, $ext)) {
+            $sortedNotWritableFile[] = $entry;
+        }
+    }
+
+    return array(
+        'file_writable' => $sortedWritableFile,
+        'file_not_writable' => $sortedNotWritableFile
+    );
+}
+
+function getFileTokens($filename) {
+    $fileContent = @file_get_contents($filename);
+    if ($fileContent === false) {
+        return array();
+    }
+    
+    $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
+    $tokens = @token_get_all($fileContent);
+    $output = array();
+    $tokenCount = count($tokens);
+
+    if ($tokenCount > 0) {
+        for ($i = 0; $i < $tokenCount; $i++) {
+            if (isset($tokens[$i][1])) {
+                $output[] = strtolower($tokens[$i][1]);
+            }
+        }
+    }
+    $output = array_values(
+        array_unique(array_filter(array_map("trim", $output)))
+    );
+    return $output;
+}
+
+function advancedWebshellDetection($filePath) {
+    $content = @file_get_contents($filePath);
+    if ($content === false) {
+        return array('status' => 'safe', 'reason' => 'Cannot read file', 'patterns' => array(), 'score' => 0);
+    }
+
+    $suspiciousFunctions = array(
+        // Code Execution
+        'eval', 'assert', 'create_function', 'preg_replace', 'call_user_func',
+        'call_user_func_array', 'forward_static_call', 'forward_static_call_array',
+        
+        // Command Execution
+        'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'popen',
+        'pcntl_exec', 'dl',
+        
+        // File Operations
+        'file_put_contents', 'fopen', 'fwrite', 'fclose', 'unlink', 'rmdir',
+        'mkdir', 'chmod', 'chown', 'copy', 'rename',
+        
+        // Obfuscation
+        'base64_decode', 'gzinflate', 'gzuncompress', 'gzdecode', 'str_rot13',
+        'convert_uuencode', 'convert_uudecode', 'hex2bin', 'bin2hex',
+        'rawurldecode', 'urldecode',
+        
+        // Network
+        'fsockopen', 'pfsockopen', 'stream_socket_client', 'curl_exec',
+        'curl_multi_exec',
+        
+        // Information Disclosure
+        'phpinfo', 'get_defined_vars', 'get_defined_functions', 'get_loaded_extensions',
+        'ini_get_all', 'get_included_files',
+        
+        // Bypass Techniques
+        'ini_set', 'set_time_limit', 'ignore_user_abort', 'error_reporting',
+        'register_shutdown_function',
+        
+        // Database
+        'mysql_connect', 'mysqli_connect', 'pg_connect', 'sqlite_open',
+        
+        // Miscellaneous
+        'extract', 'parse_str', 'import_request_variables', 'serialize',
+        'unserialize'
+    );
+
+    $suspiciousPatterns = array(
+        // Direct code execution patterns
+        '/eval\s*\(\s*(\$[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*|\$_GET|\$_POST|\$_REQUEST|\$_COOKIE|\$_SERVER)/i',
+        '/assert\s*\(\s*(\$[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*|\$_GET|\$_POST|\$_REQUEST|\$_COOKIE)/i',
+        '/base64_decode\s*\(\s*(\$[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*|\$_GET|\$_POST|\$_REQUEST|\$_COOKIE)/i',
+        
+        // Obfuscation chains
+        '/eval\s*\(\s*gzinflate\s*\(\s*base64_decode/i',
+        '/eval\s*\(\s*str_rot13\s*\(\s*base64_decode/i',
+        '/gzinflate\s*\(\s*base64_decode/i',
+        '/base64_decode\s*\(\s*[\'\"][A-Za-z0-9+\/=]{100,}[\'\"]/i',
+        
+        // Common webshell signatures
+        '/\$auth_pass\s*=/i',
+        '/\$password\s*=/i',
+        '/cmdshell/i',
+        '/phpspy/i',
+        '/c99shell/i',
+        '/r57shell/i',
+        '/WebShell/i',
+        '/wso\s*shell/i',
+        '/b374k\s*shell/i',
+        '/sniper\s*shell/i',
+        
+        // Dangerous preg_replace patterns
+        '/preg_replace\s*\(.*\/e.*\)/i',
+        '/preg_replace\s*\(\s*[\'\"].*\/e.*[\'\"]/i',
+        
+        // File upload patterns
+        '/move_uploaded_file\s*\(\s*\$_FILES/i',
+        '/file_put_contents\s*\(\s*(\$[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*|\$_GET|\$_POST)/i',
+        
+        // Command injection patterns
+        '/system\s*\(\s*(\$[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*|\$_GET|\$_POST|\$_REQUEST|\$_COOKIE)/i',
+        '/exec\s*\(\s*(\$[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*|\$_GET|\$_POST|\$_REQUEST|\$_COOKIE)/i',
+        '/shell_exec\s*\(\s*(\$[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*|\$_GET|\$_POST|\$_REQUEST|\$_COOKIE)/i',
+        
+        // Backdoor patterns
+        '/@ini_set.*error_log.*@?assert/i',
+        '/@ini_set.*display_errors.*0.*@?assert/i',
+        '/\\x[0-9a-f]{2}.*\\x[0-9a-f]{2}.*\\x[0-9a-f]{2}/i',
+        
+        // New generation webshell patterns
+        '/\$[\w]+\s*=\s*[\'\"][\w\/+]{50,}[\'\"]\s*;\s*eval\s*\(\s*\$[\w]+\s*\)/i',
+        '/function\s+[\w]+\s*\(\s*\)\s*\{\s*eval\s*\(\s*\$_POST\[/i',
+        '/\$_POST\[\s*[\'\"][\w]+\s*[\'\"]\s*\]\s*\(\s*\)\s*;/i',
+        
+        // JavaScript obfuscation in PHP
+        '/<script[^>]*>.*eval\s*\(.*<\/script>/is',
+        '/document\.write\s*\(\s*base64_decode/i',
+        
+        // XOR encoding patterns
+        '/\$\w+\s*=\s*\'\'\.\(\s*\$\w+\s*\^\s*\$\w+\s*\)/i',
+        
+        // Malicious variable names
+        '/\$(pass|password|auth|login|admin|cmd|command|shell|backdoor|hidden|secret)/i',
+    );
+
+    // Check file extension and name for suspicious patterns
+    $filename = basename($filePath);
+    $suspiciousFilenames = array(
+        '/shell/i', '/backdoor/i', '/cmd/i', '/adminer/i', '/phpmyadmin/i',
+        '/c99/i', '/r57/i', '/wso/i', '/b374k/i', '/uploader/i',
+        '/defacer/i', '/hack/i', '/exploit/i', '/mailer/i', '/spammer/i',
+        '/bot/i', '/bypass/i', '/hidden/i', '/secret/i'
+    );
+
+    $score = 0;
+    $detectedPatterns = array();
+    $tokens = getFileTokens($filePath);
+
+    // Check suspicious filenames
+    foreach ($suspiciousFilenames as $pattern) {
+        if (preg_match($pattern, $filename)) {
+            $score += 10;
+            $detectedPatterns[] = 'suspicious_filename';
+            break;
+        }
+    }
+
+    // Check hidden files (starting with .)
+    if (strpos($filename, '.') === 0 && $filename != '.' && $filename != '..') {
+        $score += 5;
+        $detectedPatterns[] = 'hidden_file';
+    }
+
+    // Check suspicious functions
+    $highRiskCount = 0;
+    $mediumRiskCount = 0;
+    
+    foreach ($suspiciousFunctions as $func) {
+        if (in_array($func, $tokens)) {
+            $detectedPatterns[] = $func;
+            
+            if (in_array($func, array('eval', 'assert', 'exec', 'shell_exec', 'system', 'passthru', 'popen', 'proc_open', 'create_function', 'pcntl_exec'))) {
+                $highRiskCount++;
+                $score += 10;
+            } else {
+                $mediumRiskCount++;
+                $score += 5;
+            }
+        }
+    }
+
+    // Check suspicious patterns in content
+    $patternMatches = 0;
+    foreach ($suspiciousPatterns as $pattern) {
+        if (preg_match($pattern, $content)) {
+            $patternMatches++;
+            $score += 15;
+        }
+    }
+
+    // Check file size (very small files might be suspicious)
+    $fileSize = filesize($filePath);
+    if ($fileSize < 100 && $fileSize > 0) {
+        $score += 5;
+        $detectedPatterns[] = 'suspicious_size';
+    }
+
+    if ($score >= 50 || $patternMatches >= 3 || $highRiskCount >= 3) {
+        return array('status' => 'malicious', 'reason' => 'High confidence webshell detected', 'patterns' => $detectedPatterns, 'score' => $score);
+    } elseif ($score >= 30 || $patternMatches >= 2 || $highRiskCount >= 2) {
+        return array('status' => 'malicious', 'reason' => 'Multiple dangerous patterns detected', 'patterns' => $detectedPatterns, 'score' => $score);
+    } elseif ($score >= 20 || $patternMatches >= 1 || $highRiskCount >= 1) {
+        return array('status' => 'suspicious', 'reason' => 'Suspicious patterns detected', 'patterns' => $detectedPatterns, 'score' => $score);
+    } elseif ($highRiskCount >= 1 && $mediumRiskCount >= 2) {
+        return array('status' => 'suspicious', 'reason' => 'Dangerous function combination', 'patterns' => $detectedPatterns, 'score' => $score);
+    } elseif ($mediumRiskCount >= 3) {
+        return array('status' => 'suspicious', 'reason' => 'Multiple suspicious functions', 'patterns' => $detectedPatterns, 'score' => $score);
+    }
+
+    return array('status' => 'safe', 'reason' => 'No malicious patterns detected', 'patterns' => $detectedPatterns, 'score' => $score);
+}
+
+function deleteFiles($files) {
+    $results = array();
+    foreach ($files as $file) {
+        if (file_exists($file) && is_writable($file)) {
+            if (@unlink($file)) {
+                $results[$file] = 'success';
+            } else {
+                $results[$file] = 'failed';
+            }
+        } else {
+            $results[$file] = 'not_found_or_not_writable';
+        }
+    }
+    return $results;
+}
+
+function exportScanResults($safeFiles, $maliciousFiles, $suspiciousFiles, $directory) {
+    $timestamp = date('Y-m-d_H-i-s');
+    $filename = "b4dscan_results_{$timestamp}.txt";
+    
+    $content = "B4DSCAN WEBSHELL SCAN REPORT\n";
+    $content .= "===================================\n";
+    $content .= "Scan Date: " . date('Y-m-d H:i:s') . "\n";
+    $content .= "Scanner: B4DSCAN by @Paulinthers\n";
+    $content .= "Directory: " . $directory . "\n";
+    $content .= "Total Files Scanned: " . (count($safeFiles) + count($maliciousFiles) + count($suspiciousFiles)) . "\n\n";
+    
+    $content .= "MALICIOUS FILES (" . count($maliciousFiles) . "):\n";
+    $content .= "================\n";
+    foreach ($maliciousFiles as $file) {
+        $content .= "File: " . $file['file'] . "\n";
+        $content .= "Reason: " . $file['reason'] . "\n";
+        $content .= "Score: " . $file['score'] . "\n";
+        $content .= "Detected Patterns: " . implode(', ', $file['patterns']) . "\n";
+        $content .= "URL: " . $file['url'] . "\n";
+        $content .= "---\n";
+    }
+    
+    $content .= "\nSUSPICIOUS FILES (" . count($suspiciousFiles) . "):\n";
+    $content .= "==================\n";
+    foreach ($suspiciousFiles as $file) {
+        $content .= "File: " . $file['file'] . "\n";
+        $content .= "Reason: " . $file['reason'] . "\n";
+        $content .= "Score: " . $file['score'] . "\n";
+        $content .= "Detected Patterns: " . implode(', ', $file['patterns']) . "\n";
+        $content .= "URL: " . $file['url'] . "\n";
+        $content .= "---\n";
+    }
+    
+    $content .= "\nSAFE FILES (" . count($safeFiles) . "):\n";
+    $content .= "===========\n";
+    foreach ($safeFiles as $file) {
+        $content .= "File: " . $file['file'] . "\n";
+        $content .= "Reason: " . $file['reason'] . "\n";
+        $content .= "Score: " . $file['score'] . "\n";
+        $content .= "---\n";
+    }
+    
+    $content .= "\n" . str_repeat("=", 50) . "\n";
+    $content .= "Created by Pawline - All Right Reserved\n";
+    $content .= "NO RECODE ALLOWED - For educational and responsible security use only!\n";
+    
+    header('Content-Type: text/plain');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    echo $content;
+    exit;
+}
+
+// Extended file extensions to scan
+$ext = array(
+    'php', 'phps', 'pht', 'phpt', 'phtml', 'phar', 
+    'php3', 'php4', 'php5', 'php7', 'php8',
+    'inc', 'tmp', 'temp', 'txt', 'log', 'html', 'htm',
+    'js', 'css', 'sql', 'xml', 'json',
+    'suspected', 'backdoor', 'shell'
+);
+
+// Process AJAX requests
+if (isset($_GET['action'])) {
+    header('Content-Type: application/json');
+    
+    switch ($_GET['action']) {
+        case 'get_file_preview':
+            if (isset($_GET['file'])) {
+                $preview = getFilePreview($_GET['file']);
+                echo json_encode($preview);
+            }
+            exit;
+    }
+}
+
+// Store scan results in session to avoid rescan after delete
+session_start();
+
+// Process file deletion if requested
+$deleteResults = array();
+if (isset($_POST['delete_files']) && !empty($_POST['files_to_delete'])) {
+    $deleteResults = deleteFiles($_POST['files_to_delete']);
+    
+    // Update session data by removing deleted files
+    if (isset($_SESSION['scan_results'])) {
+        $scanResults = $_SESSION['scan_results'];
+        foreach ($_POST['files_to_delete'] as $deletedFile) {
+            foreach ($scanResults['malicious'] as $key => $file) {
+                if ($file['file'] === $deletedFile) {
+                    unset($scanResults['malicious'][$key]);
+                }
+            }
+            foreach ($scanResults['suspicious'] as $key => $file) {
+                if ($file['file'] === $deletedFile) {
+                    unset($scanResults['suspicious'][$key]);
+                }
+            }
+            foreach ($scanResults['safe'] as $key => $file) {
+                if ($file['file'] === $deletedFile) {
+                    unset($scanResults['safe'][$key]);
+                }
+            }
+        }
+        // Reindex arrays
+        $scanResults['malicious'] = array_values($scanResults['malicious']);
+        $scanResults['suspicious'] = array_values($scanResults['suspicious']);
+        $scanResults['safe'] = array_values($scanResults['safe']);
+        $_SESSION['scan_results'] = $scanResults;
+    }
+}
+
+// Process export if requested
+if (isset($_POST['export_results'])) {
+    $safeFiles = json_decode($_POST['safe_files'], true);
+    $maliciousFiles = json_decode($_POST['malicious_files'], true);
+    $suspiciousFiles = json_decode($_POST['suspicious_files'], true);
+    $directory = $_POST['dir'];
+    
+    exportScanResults($safeFiles, $maliciousFiles, $suspiciousFiles, $directory);
+}
+
+// Process scan if form submitted
+if (isset($_POST['submit'])) {
+    $path = $_POST['dir'];
+    $result = getSortedByExtension($path, $ext);
+    $fileWritable = $result['file_writable'];
+    $fileWritable = sortByLastModified($fileWritable);
+
+    $safeFiles = array();
+    $suspiciousFiles = array();
+    $maliciousFiles = array();
+
+    foreach ($fileWritable as $file) {
+        $filePath = str_replace('\\', '/', $file);
+        $analysis = advancedWebshellDetection($filePath);
+        
+        $fileData = array(
+            'file' => $filePath,
+            'url' => getFileUrl($filePath),
+            'reason' => $analysis['reason'],
+            'patterns' => $analysis['patterns'],
+            'score' => $analysis['score']
+        );
+        
+        switch ($analysis['status']) {
+            case 'malicious':
+                $maliciousFiles[] = $fileData;
+                break;
+            case 'suspicious':
+                $suspiciousFiles[] = $fileData;
+                break;
+            default:
+                $safeFiles[] = $fileData;
+                break;
+        }
+    }
+    
+    // Store results in session
+    $_SESSION['scan_results'] = array(
+        'malicious' => $maliciousFiles,
+        'suspicious' => $suspiciousFiles,
+        'safe' => $safeFiles,
+        'directory' => $path
+    );
+} elseif (isset($_SESSION['scan_results']) && !isset($_POST['delete_files'])) {
+    // Use stored results if available
+    $maliciousFiles = $_SESSION['scan_results']['malicious'];
+    $suspiciousFiles = $_SESSION['scan_results']['suspicious'];
+    $safeFiles = $_SESSION['scan_results']['safe'];
+    $directory = $_SESSION['scan_results']['directory'];
+}
+
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>B4DSCAN Advanced by @Paulinthers</title>
+    <style type="text/css">
+        @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue:wght@300;400;500;700&display=swap');
+        
+        :root {
+            --danger-color: #ff4757;
+            --warning-color: #ffa502;
+            --success-color: #2ed573;
+            --info-color: #3742fa;
+            --dark-color: #0f0f0f;
+            --darker-color: #000000;
+            --light-color: #1a1a1a;
+            --text-color: #ffffff;
+            --border-color: #333333;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Bebas Neue', sans-serif;
+            color: var(--text-color);
+            background: var(--darker-color);
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background: var(--dark-color);
+            border-radius: 10px;
+            padding: 30px;
+            border: 1px solid var(--border-color);
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid var(--info-color);
+        }
+
+        .header h1 {
+            font-size: 3em;
+            color: var(--text-color);
+            margin: 0;
+        }
+
+        .header p {
+            color: #cccccc;
+            margin: 10px 0 0;
+            font-size: 1.1em;
+        }
+
+        .warning-box {
+            background: rgba(255, 165, 2, 0.1);
+            border: 1px solid var(--warning-color);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .scan-form {
+            background: var(--light-color);
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            border: 1px solid var(--border-color);
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid var(--border-color);
+            border-radius: 6px;
+            font-family: 'Bebas Neue', sans-serif;
+            background: var(--dark-color);
+            color: var(--text-color);
+            font-size: 1em;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: var(--info-color);
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: 'Bebas Neue', sans-serif;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            margin: 5px;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9em;
+        }
+
+        .btn-primary {
+            background: var(--info-color);
+            color: white;
+        }
+
+        .btn-danger {
+            background: var(--danger-color);
+            color: white;
+        }
+
+        .btn-warning {
+            background: var(--warning-color);
+            color: white;
+        }
+
+        .btn-success {
+            background: var(--success-color);
+            color: white;
+        }
+
+        .btn-sm {
+            padding: 8px 16px;
+            font-size: 0.8em;
+        }
+
+        .btn:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }
+
+        .results-section {
+            margin-top: 30px;
+        }
+
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .stat-card {
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            color: white;
+            border: 1px solid var(--border-color);
+        }
+
+        .stat-malicious {
+            background: var(--danger-color);
+        }
+
+        .stat-suspicious {
+            background: var(--warning-color);
+        }
+
+        .stat-safe {
+            background: var(--success-color);
+        }
+
+        .stat-total {
+            background: var(--info-color);
+        }
+
+        .stat-count {
+            font-size: 2em;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+            background: var(--light-color);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .results-table th,
+        .results-table td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .results-table th {
+            background: var(--info-color);
+            font-weight: 600;
+            color: white;
+        }
+
+        .status-malicious {
+            color: var(--danger-color);
+            font-weight: 700;
+        }
+
+        .status-suspicious {
+            color: var(--warning-color);
+            font-weight: 700;
+        }
+
+        .status-safe {
+            color: var(--success-color);
+            font-weight: 600;
+        }
+
+        .file-path {
+            word-break: break-word;
+            font-family: 'Bebas Neue', monospace;
+            font-size: 0.9em;
+            max-width: 300px;
+        }
+
+        .pattern-info {
+            color: #cccccc;
+            font-size: 0.8em;
+            margin-top: 5px;
+        }
+
+        .score-badge {
+            background: var(--info-color);
+            color: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.7em;
+            margin-left: 5px;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+
+        .delete-results {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+        }
+
+        .delete-success {
+            background: rgba(46, 213, 115, 0.1);
+            color: var(--success-color);
+        }
+
+        .delete-failed {
+            background: rgba(255, 71, 87, 0.1);
+            color: var(--danger-color);
+        }
+
+        .no-results {
+            text-align: center;
+            padding: 40px;
+            color: #cccccc;
+        }
+
+        .tab-buttons {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 2px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+
+        .tab-button {
+            padding: 12px 20px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            color: var(--text-color);
+            font-weight: 500;
+            transition: all 0.3s ease;
+            font-family: 'Bebas Neue', sans-serif;
+        }
+
+        .tab-button.active {
+            border-bottom-color: var(--info-color);
+            color: var(--info-color);
+        }
+
+        .tab-button:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .file-actions {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+
+        .file-preview-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.9);
+            z-index: 1000;
+        }
+
+        .file-preview-content {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: var(--dark-color);
+            padding: 20px;
+            border-radius: 10px;
+            width: 90%;
+            height: 80%;
+            max-width: 1200px;
+            border: 1px solid var(--border-color);
+        }
+
+        .file-preview-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .file-preview-body {
+            height: calc(100% - 60px);
+            overflow: auto;
+        }
+
+        .file-content {
+            background: var(--light-color);
+            padding: 15px;
+            border-radius: 6px;
+            font-family: 'Bebas Neue', monospace;
+            white-space: pre-wrap;
+            max-height: 100%;
+            overflow: auto;
+            color: var(--text-color);
+            font-size: 0.9em;
+        }
+
+        .close-preview {
+            background: var(--danger-color);
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: 'Bebas Neue', sans-serif;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+            color: #cccccc;
+            font-size: 0.9em;
+        }
+
+        /* Progress Bar Styles */
+        .progress-section {
+            margin: 30px 0;
+            text-align: center;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: var(--light-color);
+            border-radius: 10px;
+            margin: 20px 0;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(45deg, var(--info-color), var(--success-color));
+            transition: width 0.5s ease;
+            width: 0%;
+        }
+
+        .progress-text {
+            text-align: center;
+            margin-bottom: 15px;
+            color: var(--text-color);
+            font-size: 1.1em;
+        }
+
+        .current-scan {
+            color: var(--info-color);
+            font-weight: 600;
+            margin-top: 10px;
+            font-family: 'Bebas Neue', monospace;
+        }
+
+        .scanning-animation {
+            text-align: center;
+            padding: 30px;
+        }
+
+        .spinner {
+            border: 4px solid rgba(255,255,255,0.1);
+            border-top: 4px solid var(--info-color);
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 15px;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .action-buttons {
+                justify-content: center;
+            }
+            
+            .btn {
+                padding: 10px 15px;
+            }
+            
+            .file-path {
+                max-width: 200px;
+            }
+        }
+    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><i class="fas fa-shield-alt"></i> B4DSCAN</h1>
+            
+        </div>
+
+        <div class="warning-box">
+            <strong>by @Paulinthers - Advanced Webshell Scanner</strong>
+        </div>
+
+        <div class="scan-form">
+            <form method="post" id="scanForm">
+                <div class="form-group">
+                    <label><i class="fas fa-folder"></i> Directory to Scan:</label>
+                    <input type="text" name="dir" value="<?= htmlspecialchars(getcwd()) ?>">
+                </div>
+                <button type="submit" name="submit" class="btn btn-primary" id="scanButton">
+                    <i class="fas fa-search"></i> Start Webshell Scanner
+                </button>
+            </form>
+        </div>
+
+        <!-- Progress Bar Section -->
+        <div id="progressSection" class="progress-section" style="display: none;">
+            <div class="scanning-animation">
+                <div class="spinner"></div>
+                <div class="progress-text">
+                    <i class="fas fa-shield-alt"></i> Webshell Scanner in Progress...
+                    <span id="progressPercent">0%</span>
+                </div>
+                <div id="currentFile" class="current-scan">Initializing advanced security scan...</div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+        </div>
+
+        <?php if (isset($_POST['submit']) || isset($_SESSION['scan_results']) || !empty($deleteResults)): ?>
+            <?php
+            // Use session data if available, otherwise use newly scanned data
+            if (isset($_SESSION['scan_results'])) {
+                $maliciousFiles = $_SESSION['scan_results']['malicious'];
+                $suspiciousFiles = $_SESSION['scan_results']['suspicious'];
+                $safeFiles = $_SESSION['scan_results']['safe'];
+                $directory = $_SESSION['scan_results']['directory'];
+            }
+            ?>
+
+            <div class="results-section" id="resultsSection">
+                <div class="results-header">
+                    <h2><i class="fas fa-list-alt"></i> Advanced Scan Results</h2>
+                    <div class="action-buttons">
+                        <button class="btn btn-warning" onclick="selectAll('malicious')">
+                            <i class="fas fa-check-double"></i> Select All Malicious
+                        </button>
+                        <button class="btn btn-warning" onclick="deselectAll()">
+                            <i class="fas fa-times"></i> Deselect All
+                        </button>
+                        <button class="btn btn-danger" onclick="confirmDelete()" id="deleteBtn" disabled>
+                            <i class="fas fa-trash"></i> Delete Selected Files
+                        </button>
+                        <button class="btn btn-success" onclick="exportResults()">
+                            <i class="fas fa-download"></i> Export Results
+                        </button>
+                    </div>
+                </div>
+
+                <div class="stats">
+                    <div class="stat-card stat-malicious">
+                        <div class="stat-count"><?= count($maliciousFiles) ?></div>
+                        <div class="stat-label"><i class="fas fa-skull-crossbones"></i> Malicious Files</div>
+                    </div>
+                    <div class="stat-card stat-suspicious">
+                        <div class="stat-count"><?= count($suspiciousFiles) ?></div>
+                        <div class="stat-label"><i class="fas fa-exclamation-triangle"></i> Suspicious Files</div>
+                    </div>
+                    <div class="stat-card stat-safe">
+                        <div class="stat-count"><?= count($safeFiles) ?></div>
+                        <div class="stat-label"><i class="fas fa-shield-alt"></i> Safe Files</div>
+                    </div>
+                    <div class="stat-card stat-total">
+                        <div class="stat-count"><?= count($maliciousFiles) + count($suspiciousFiles) + count($safeFiles) ?></div>
+                        <div class="stat-label"><i class="fas fa-file-code"></i> Total Files</div>
+                    </div>
+                </div>
+
+                <?php if (!empty($deleteResults)): ?>
+                    <div class="delete-results">
+                        <h3><i class="fas fa-trash"></i> Deletion Results</h3>
+                        <?php foreach ($deleteResults as $file => $result): ?>
+                            <div class="<?= $result === 'success' ? 'delete-success' : 'delete-failed' ?>">
+                                <i class="fas <?= $result === 'success' ? 'fa-check-circle' : 'fa-times-circle' ?>"></i>
+                                <?= htmlspecialchars($file) ?>: 
+                                <?= 
+                                    $result === 'success' ? 'Successfully deleted' : 
+                                    ($result === 'failed' ? 'Failed to delete' : 'File not found or not writable')
+                                ?>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+
+                <div class="tab-buttons">
+                    <button class="tab-button active" onclick="showTab('malicious')">
+                        <i class="fas fa-skull-crossbones"></i> Malicious (<?= count($maliciousFiles) ?>)
+                    </button>
+                    <button class="tab-button" onclick="showTab('suspicious')">
+                        <i class="fas fa-exclamation-triangle"></i> Suspicious (<?= count($suspiciousFiles) ?>)
+                    </button>
+                    <button class="tab-button" onclick="showTab('safe')">
+                        <i class="fas fa-shield-alt"></i> Safe (<?= count($safeFiles) ?>)
+                    </button>
+                </div>
+
+                <form method="post" id="deleteForm">
+                    <input type="hidden" name="dir" value="<?= htmlspecialchars($directory ?? $_POST['dir'] ?? '') ?>">
+                    
+                    <input type="hidden" name="safe_files" id="safeFiles" value="<?= htmlspecialchars(json_encode($safeFiles)) ?>">
+                    <input type="hidden" name="malicious_files" id="maliciousFiles" value="<?= htmlspecialchars(json_encode($maliciousFiles)) ?>">
+                    <input type="hidden" name="suspicious_files" id="suspiciousFiles" value="<?= htmlspecialchars(json_encode($suspiciousFiles)) ?>">
+                    
+                    <div id="malicious-tab" class="tab-content active">
+                        <?php if (!empty($maliciousFiles)): ?>
+                            <table class="results-table">
+                                <thead>
+                                    <tr>
+                                        <th width="30px"><input type="checkbox" id="selectAllMalicious" onchange="toggleSelectAll('malicious', this)"></th>
+                                        <th>File Path</th>
+                                        <th width="120px">Status</th>
+                                        <th>Detection Details</th>
+                                        <th width="150px">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($maliciousFiles as $result): ?>
+                                        <tr>
+                                            <td>
+                                                <input type="checkbox" name="files_to_delete[]" value="<?= htmlspecialchars($result['file']) ?>" 
+                                                       class="file-checkbox malicious-checkbox" onchange="updateDeleteButton()">
+                                            </td>
+                                            <td class="file-path"><?= htmlspecialchars($result['file']) ?></td>
+                                            <td class="status-malicious">
+                                                <i class="fas fa-skull-crossbones"></i> HIGH RISK
+                                                <span class="score-badge">Score: <?= $result['score'] ?></span>
+                                            </td>
+                                            <td>
+                                                <div><?= htmlspecialchars($result['reason']) ?></div>
+                                                <?php if (!empty($result['patterns'])): ?>
+                                                    <div class="pattern-info">
+                                                        <i class="fas fa-code"></i> Patterns: <?= htmlspecialchars(implode(', ', $result['patterns'])) ?>
+                                                    </div>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td class="file-actions">
+                                                <button type="button" class="btn btn-sm btn-primary" onclick="openFilePreview('<?= htmlspecialchars($result['file']) ?>')">
+                                                    <i class="fas fa-eye"></i> View
+                                                </button>
+                                                <a href="<?= htmlspecialchars($result['url']) ?>" target="_blank" class="btn btn-sm btn-success">
+                                                    <i class="fas fa-external-link-alt"></i> Open URL
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        <?php else: ?>
+                            <div class="no-results">
+                                <i class="fas fa-check-circle" style="font-size: 3em; margin-bottom: 15px; color: var(--success-color);"></i>
+                                <h3>No Malicious Files Detected</h3>
+                                <p>Your directory is clean from malicious scripts!</p>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+
+                    <div id="suspicious-tab" class="tab-content">
+                        <?php if (!empty($suspiciousFiles)): ?>
+                            <table class="results-table">
+                                <thead>
+                                    <tr>
+                                        <th width="30px"><input type="checkbox" id="selectAllSuspicious" onchange="toggleSelectAll('suspicious', this)"></th>
+                                        <th>File Path</th>
+                                        <th width="120px">Status</th>
+                                        <th>Detection Details</th>
+                                        <th width="150px">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($suspiciousFiles as $result): ?>
+                                        <tr>
+                                            <td>
+                                                <input type="checkbox" name="files_to_delete[]" value="<?= htmlspecialchars($result['file']) ?>" 
+                                                       class="file-checkbox suspicious-checkbox" onchange="updateDeleteButton()">
+                                            </td>
+                                            <td class="file-path"><?= htmlspecialchars($result['file']) ?></td>
+                                            <td class="status-suspicious">
+                                                <i class="fas fa-exclamation-triangle"></i> SUSPICIOUS
+                                                <span class="score-badge">Score: <?= $result['score'] ?></span>
+                                            </td>
+                                            <td>
+                                                <div><?= htmlspecialchars($result['reason']) ?></div>
+                                                <?php if (!empty($result['patterns'])): ?>
+                                                    <div class="pattern-info">
+                                                        <i class="fas fa-code"></i> Patterns: <?= htmlspecialchars(implode(', ', $result['patterns'])) ?>
+                                                    </div>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td class="file-actions">
+                                                <button type="button" class="btn btn-sm btn-primary" onclick="openFilePreview('<?= htmlspecialchars($result['file']) ?>')">
+                                                    <i class="fas fa-eye"></i> View
+                                                </button>
+                                                <a href="<?= htmlspecialchars($result['url']) ?>" target="_blank" class="btn btn-sm btn-success">
+                                                    <i class="fas fa-external-link-alt"></i> Open URL
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        <?php else: ?>
+                            <div class="no-results">
+                                <i class="fas fa-check-circle" style="font-size: 3em; margin-bottom: 15px; color: var(--success-color);"></i>
+                                <h3>No Suspicious Files Detected</h3>
+                                <p>No files with suspicious patterns were detected.</p>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+
+                    <div id="safe-tab" class="tab-content">
+                        <?php if (!empty($safeFiles)): ?>
+                            <table class="results-table">
+                                <thead>
+                                    <tr>
+                                        <th>File Path</th>
+                                        <th width="120px">Status</th>
+                                        <th>Verification</th>
+                                        <th width="150px">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($safeFiles as $result): ?>
+                                        <tr>
+                                            <td class="file-path"><?= htmlspecialchars($result['file']) ?></td>
+                                            <td class="status-safe">
+                                                <i class="fas fa-shield-alt"></i> SAFE
+                                                <span class="score-badge">Score: <?= $result['score'] ?></span>
+                                            </td>
+                                            <td><?= htmlspecialchars($result['reason']) ?></td>
+                                            <td class="file-actions">
+                                                <button type="button" class="btn btn-sm btn-primary" onclick="openFilePreview('<?= htmlspecialchars($result['file']) ?>')">
+                                                    <i class="fas fa-eye"></i> View
+                                                </button>
+                                                <a href="<?= htmlspecialchars($result['url']) ?>" target="_blank" class="btn btn-sm btn-success">
+                                                    <i class="fas fa-external-link-alt"></i> Open URL
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        <?php else: ?>
+                            <div class="no-results">
+                                <i class="fas fa-info-circle" style="font-size: 3em; margin-bottom: 15px; color: var(--info-color);"></i>
+                                <h3>No Safe Files to Display</h3>
+                                <p>All scanned files were categorized as suspicious or malicious.</p>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </form>
+
+                <form method="post" id="exportForm">
+                    <input type="hidden" name="dir" value="<?= htmlspecialchars($directory ?? $_POST['dir'] ?? '') ?>">
+                    <input type="hidden" name="safe_files" value="<?= htmlspecialchars(json_encode($safeFiles)) ?>">
+                    <input type="hidden" name="malicious_files" value="<?= htmlspecialchars(json_encode($maliciousFiles)) ?>">
+                    <input type="hidden" name="suspicious_files" value="<?= htmlspecialchars(json_encode($suspiciousFiles)) ?>">
+                    <input type="hidden" name="export_results" value="1">
+                </form>
+            </div>
+        <?php endif; ?>
+
+        <div class="footer">
+            <p><i class="fas fa-code"></i> Created by Pawline - All Right Reserved</p>
+        </div>
+    </div>
+
+    <!-- File Preview Modal -->
+    <div id="filePreviewModal" class="file-preview-modal">
+        <div class="file-preview-content">
+            <div class="file-preview-header">
+                <h3><i class="fas fa-file-code"></i> File Preview</h3>
+                <button class="close-preview" onclick="closeFilePreview()">
+                    <i class="fas fa-times"></i> Close
+                </button>
+            </div>
+            <div class="file-preview-body">
+                <div id="filePreviewContent" class="file-content">
+                    Loading file content...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        let progressInterval;
+        
+        function showTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.classList.remove('active');
+            });
+            
+            document.getElementById(tabName + '-tab').classList.add('active');
+            event.target.classList.add('active');
+        }
+        
+        function toggleSelectAll(category, checkbox) {
+            const checkboxes = document.querySelectorAll('.' + category + '-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = checkbox.checked;
+            });
+            updateDeleteButton();
+        }
+        
+        function selectAll(category) {
+            const checkboxes = document.querySelectorAll('.' + category + '-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = true;
+            });
+            document.getElementById('selectAll' + category.charAt(0).toUpperCase() + category.slice(1)).checked = true;
+            updateDeleteButton();
+        }
+        
+        function deselectAll() {
+            const checkboxes = document.querySelectorAll('.file-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = false;
+            });
+            document.querySelectorAll('[id^="selectAll"]').forEach(cb => {
+                cb.checked = false;
+            });
+            updateDeleteButton();
+        }
+        
+        function updateDeleteButton() {
+            const checked = document.querySelectorAll('.file-checkbox:checked');
+            const deleteBtn = document.getElementById('deleteBtn');
+            deleteBtn.disabled = checked.length === 0;
+        }
+        
+        function confirmDelete() {
+            const checked = document.querySelectorAll('.file-checkbox:checked');
+            if (checked.length > 0 && confirm(`⚠️ Are you sure you want to delete ${checked.length} selected files?\n\nThis action cannot be undone!`)) {
+                // Set the action to delete files
+                const form = document.getElementById('deleteForm');
+                const deleteInput = document.createElement('input');
+                deleteInput.type = 'hidden';
+                deleteInput.name = 'delete_files';
+                deleteInput.value = '1';
+                form.appendChild(deleteInput);
+                form.submit();
+            }
+        }
+        
+        function exportResults() {
+            document.getElementById('exportForm').submit();
+        }
+        
+        function openFilePreview(filePath) {
+            document.getElementById('filePreviewContent').textContent = 'Loading file content...';
+            document.getElementById('filePreviewModal').style.display = 'block';
+            
+            fetch('?action=get_file_preview&file=' + encodeURIComponent(filePath))
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        document.getElementById('filePreviewContent').textContent = 'Error: ' + data.error;
+                    } else {
+                        let content = data.preview;
+                        if (data.is_truncated) {
+                            content += '\n\n--- TRUNCATED ---\n' + 
+                                      'Showing ' + data.preview_lines + ' of ' + data.total_lines + ' lines\n' +
+                                      'File size: ' + (data.file_size / 1024).toFixed(2) + ' KB';
+                        }
+                        document.getElementById('filePreviewContent').textContent = content;
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('filePreviewContent').textContent = 'Error loading file: ' + error;
+                });
+        }
+        
+        function closeFilePreview() {
+            document.getElementById('filePreviewModal').style.display = 'none';
+        }
+        
+        // Real-time progress simulation
+        function startProgressSimulation() {
+            const progressSection = document.getElementById('progressSection');
+            const resultsSection = document.getElementById('resultsSection');
+            const scanButton = document.getElementById('scanButton');
+            
+            progressSection.style.display = 'block';
+            if (resultsSection) resultsSection.style.display = 'none';
+            scanButton.disabled = true;
+            scanButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Scanning...';
+            
+            let progress = 0;
+            const files = [
+                'index.php', 'config.php', 'admin.php', 'functions.php', 
+                'database.php', 'upload.php', 'login.php', 'register.php',
+                'ajax.php', 'api.php', 'lib/functions.php', 'includes/config.php',
+                'assets/script.php', 'vendor/autoload.php', 'wp-config.php',
+                'wp-admin/admin-ajax.php', 'app/Main.php', 'src/Controller.php',
+                '.htaccess', '.env', '.well-known/security.txt', '.git/config',
+                'backup/old.php', 'tmp/shell.php', 'cache/temp.php'
+            ];
+            
+            let currentFileIndex = 0;
+            
+            progressInterval = setInterval(() => {
+                progress += Math.random() * 3 + 1; // Progress 1-4% each interval
+                
+                if (progress >= 100) {
+                    progress = 100;
+                    clearInterval(progressInterval);
+                    
+                    // Show results after completion
+                    setTimeout(() => {
+                        progressSection.style.display = 'none';
+                        if (resultsSection) resultsSection.style.display = 'block';
+                        scanButton.disabled = false;
+                        scanButton.innerHTML = '<i class="fas fa-search"></i> Start Webshell Scan';
+                    }, 500);
+                }
+                
+                document.getElementById('progressFill').style.width = progress + '%';
+                document.getElementById('progressPercent').textContent = Math.round(progress) + '%';
+                
+                // Update current file being scanned
+                if (currentFileIndex < files.length - 1 && progress < 95) {
+                    currentFileIndex = Math.min(currentFileIndex + 1, files.length - 1);
+                }
+                
+                const actions = ['Scanning', 'Analyzing', 'Checking', 'Verifying', 'Inspecting'];
+                const currentAction = actions[Math.floor(Math.random() * actions.length)];
+                document.getElementById('currentFile').textContent = 
+                    `${currentAction}: ${files[currentFileIndex]}`;
+                
+            }, 200);
+        }
+        
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            updateDeleteButton();
+            
+            // Start progress when form is submitted
+            document.getElementById('scanForm').addEventListener('submit', function() {
+                startProgressSimulation();
+            });
+            
+            // Close modal when clicking outside
+            document.getElementById('filePreviewModal').addEventListener('click', function(e) {
+                if (e.target === this) {
+                    closeFilePreview();
+                }
+            });
+        });
+    </script>
+</body>
+</html>
